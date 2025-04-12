@@ -7,10 +7,13 @@ library(DESeq2)
 library(magrittr)
 library(pheatmap)
 library(fdrtool)
+library(dplyr)
+library(tidyr)
 library(sva)
+library(tibble)
 #### 1. Loading data and  first look ####
-data <- read.table(paste0("data/Mov10_full_counts.txt"), header = T, row.names = 1)
-meta <- read.table(paste0("meta/Mov10_full_meta.txt"), header = T, row.names = 1)
+data <- read.table(paste0("./OmicsBasicsTheory/data/Mov10_full_counts.txt"), header = T, row.names = 1)
+meta <- read.table(paste0("./OmicsBasicsTheory/data/Mov10_full_meta.txt"), header = T, row.names = 1)
 
 View(data)
 View(meta)
@@ -126,65 +129,88 @@ design(dds) <- ~ SV1 + SV2 + sampletype
 ## run the test using Wald, this will do normalization etc. all by itself
 dds <- DESeq(dds, test = "Wald")
 
-## classic running and comparing between including SVs and no SVs
-res <- results(dds)
+## classic running and first look into results
 resultsNames(dds)
-res_tbl_oneSVs <- as.data.frame(results(dds, 
-                          contrast = c("sampletype", "MOV10_overexpression", "control")))
-res_tbl_twoSVs_sig <- res_tbl_twoSVs[which(res_tbl_twoSVs$padj < 0.05),]
-res_tbl_noSVs_sig <- res_tbl_noSVs[which(res_tbl_noSVs$padj < 0.05),]
-res_tbl_oneSVs_sig <- res_tbl_oneSVs[which(res_tbl_oneSVs$padj < 0.05),]
+res <- results(dds, alpha = 0.05, contrast = c("sampletype", "MOV10_overexpression", "control"))
+summary(res)
+# you can also get the results in a table format
+res_tbl <- as.data.frame(results(dds, contrast = c("sampletype", "MOV10_overexpression", "control")))
 
-# running for loop for later with differing SV numbers
-designs <- c("twoSVs", "oneSVs", "noSVs")
-res_list <- list()
-for(des in designs){
-  if(des == "twoSVs"){
-    design(dds) <- ~ SV1 + SV2 + sampletype
-  }else if(des == "oneSVs"){
-    design(dds) <- ~ SV1 + sampletype
-  }else{
-    design(dds) <- ~ sampletype
-  }
-  dds <- DESeq(dds, test = "Wald")
-  res_tbl <- as.data.frame(results(dds, 
-                                          contrast = c("sampletype", "MOV10_overexpression", "control")))
-  res_tbl_sig <- res_tbl[which(res_tbl$padj < 0.05),]
-  res_list[["allres"]][[des]] <- res_tbl
-  res_list[["sigres"]][[des]] <- res_tbl_sig
-}
 
-## explaining pvalue histograms, log2Fold shrinkage
-hist(res_tbl_twoSVs$pvalue, breaks=200)
-# after deseq2 and shrinkage
-plotMA(res)
-plotMA(allres2)
+## explaining pvalue histograms
+hist(res$pvalue, breaks=200)
+
 ## fdrtool
+FDR.ddsRes <- fdrtool(res$stat, statistic= "normal", plot = T)
+res_afterFDRtool <- res
+res_afterFDRtool$pvalue <- FDR.ddsRes$pval
+res_afterFDRtool[,"padj"]  <- p.adjust(res_afterFDRtool$pvalue, method = "BH")
 
-## Interpretation of output and visualization
+# comparing before and after fdrtool
+hist(res$pvalue, breaks=200)
+hist(res_afterFDRtool$pvalue, breaks=200)
 
+summary(res)
+summary(res_afterFDRtool)
+
+# how many of after fdrtool significant genes are in the significant gene list from befor fdrtool?
+table(rownames(res_afterFDRtool)[which(res_afterFDRtool$padj<0.05)] %in% rownames(res)[which(res$padj<0.05)])
+# what is the ranking of the still significant genes in the before fdrtool gene list?
+plot(which(rownames(res_afterFDRtool)[which(res_afterFDRtool$padj<0.05)] %in% rownames(res)[which(res$padj<0.05)]))
+
+## log2Fold shrinkage
+# shrinkage also has the types apeglm and ashr. Check Deseq2 documentation
+res_afterFDRtool_lfcShrinked <- lfcShrink(dds, res = res_afterFDRtool, type = "normal", coef = "sampletype_MOV10_overexpression_vs_control")
+# after deseq2 and shrinkage
+plotMA(res_afterFDRtool)
+plotMA(res_afterFDRtool_lfcShrinked)
+
+#### 6. Interpretation of output and visualization ####
+res_afterFDRtool_tbl <- res_afterFDRtool %>% data.frame() %>% rownames_to_column(var="gene")
+res_afterFDRtool_lfcShrinked_tbl <- res_afterFDRtool_lfcShrinked %>% data.frame() %>% rownames_to_column(var="gene")
 # volcano plot
-allres <- res_list$allres$twoSVs
-sigres <- res_list$sigres$twoSVs
+res_afterFDRtool_tbl$sig <- "No"
+res_afterFDRtool_tbl$sig[which(res_afterFDRtool_tbl$padj < 0.05)] <- "Yes"
 
-allres$sig <- "No"
-allres$sig[which(allres$padj < 0.05)] <- "Yes"
+res_afterFDRtool_lfcShrinked_tbl$sig <- "No"
+res_afterFDRtool_lfcShrinked_tbl$sig[which(res_afterFDRtool_lfcShrinked_tbl$padj < 0.05)] <- "Yes"
 
-allres2 <- DESeq2::lfcShrink(dds, type = "normal", res = results(dds), coef = 3)
-allres2 <- as.data.frame(allres2)
-allres2$sig <- "No"
-allres2$sig[which(allres2$padj < 0.05)] <- "Yes"
-
-
-ggplot(data = allres2) +
+# before lfc shrinkage
+ggplot(data = res_afterFDRtool_tbl) +
   geom_point(mapping =aes(x = log2FoldChange, y=-log10(padj), color = sig))+
   geom_hline(yintercept = -log10(0.05))
 
+# after lfc shrinkage
+ggplot(data = res_afterFDRtool_lfcShrinked_tbl) +
+  geom_point(mapping =aes(x = log2FoldChange, y=-log10(padj), color = sig))+
+  geom_hline(yintercept = -log10(0.05))
 
-# heatmap
+## heatmap: good for checking if effect is replicated in replicates
+normalized_counts <- counts(dds, normalized = TRUE)
+sig_norm <- data.frame(normalized_counts) %>% rownames_to_column(var = "gene") %>%
+  dplyr::filter(gene %in% res_afterFDRtool_lfcShrinked_tbl$gene[which(res_afterFDRtool_lfcShrinked_tbl$padj < 0.05)])
+# filtering for control and Mov10 overexpressed
+sig_norm <- sig_norm[,-c(2,3)]
+pheatmap(sig_norm[ , 2:length(colnames(sig_norm))], 
+         cluster_rows = T, 
+         show_rownames = F,
+         border_color = NA, 
+         fontsize = 10, 
+         scale = "row", 
+         fontsize_row = 10, 
+         height = 20)    
 
 # singular gene plots
+# with default plotCounts
+plotCounts(dds, gene="MOV10", intgroup="sampletype", returnData = FALSE, normalized = TRUE)
 
+# with more advanced labelling options in ggplot2
+d <- plotCounts(dds, gene="MOV10", intgroup="sampletype", returnData = TRUE, normalized = TRUE)
+ggplot(d, aes(x = sampletype, y = count, color = sampletype)) + 
+  geom_point(position=position_jitter(w = 0.1,h = 0)) +
+  geom_text_repel(aes(label = rownames(d)), max.overlaps = 15) + 
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
 
 
 
